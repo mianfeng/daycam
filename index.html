@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Daycam</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Personal daily record</p>
+          <h1>Daycam</h1>
+        </div>
+        <div class="status-cluster" aria-label="Application status">
+          <span id="folderStatus" class="status-pill muted">未选择数据文件夹</span>
+          <span id="cameraStatus" class="status-pill muted">摄像头未启动</span>
+          <span id="poseStatus" class="status-pill muted">关键点模型加载中</span>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="capture-area" aria-label="今日拍摄">
+          <div id="unsupportedNotice" class="notice hidden" role="alert">
+            当前浏览器不支持本地文件夹授权。请使用 Chrome 或 Edge 打开 localhost 地址。
+          </div>
+          <div id="runtimeNotice" class="notice runtime hidden" role="status" aria-live="polite"></div>
+
+          <div class="viewfinder-shell">
+            <div id="viewfinder" class="viewfinder" aria-label="拍摄取景预览">
+              <video id="cameraPreview" autoplay playsinline muted></video>
+              <img id="alignmentOverlay" class="alignment-overlay hidden" alt="参考叠图" />
+              <canvas id="poseOverlay" class="pose-overlay"></canvas>
+              <div id="guideLines" class="guide-lines" aria-hidden="true">
+                <span class="line vertical center"></span>
+                <span class="line vertical left-third"></span>
+                <span class="line vertical right-third"></span>
+                <span class="line horizontal top-third"></span>
+                <span class="line horizontal bottom-third"></span>
+                <span class="body-guide"></span>
+                <span class="head-guide"></span>
+                <span class="eye-line"></span>
+                <span class="shoulder-line"></span>
+                <span class="chest-line"></span>
+                <span class="foot-line"></span>
+              </div>
+              <div id="watermarkPreview" class="watermark-preview" aria-hidden="true">2026-04-27 12:08</div>
+              <div id="countdownOverlay" class="countdown-overlay hidden" aria-live="assertive">3</div>
+              <div id="pendingReview" class="pending-review hidden" aria-live="polite">
+                <img id="pendingPreview" alt="待确认照片" />
+                <div class="pending-actions">
+                  <button id="savePendingBtn" class="button primary compact" type="button">保存照片</button>
+                  <button id="retakePendingBtn" class="button secondary compact" type="button">重新拍摄</button>
+                </div>
+              </div>
+              <div id="cameraPlaceholder" class="camera-placeholder">
+                <span>等待摄像头</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="primary-actions">
+            <button id="chooseFolderBtn" class="button secondary" type="button">选择 daycam-data 文件夹</button>
+            <button id="startCameraBtn" class="button secondary" type="button">启动摄像头</button>
+            <button id="captureBtn" class="button primary" type="button" disabled>拍摄今日照片</button>
+          </div>
+        </section>
+
+        <aside class="side-panel" aria-label="记录和设置">
+          <section class="panel-section">
+            <div class="section-heading">
+              <p class="eyebrow">Today</p>
+              <h2 id="todayTitle">今日未完成</h2>
+            </div>
+            <div id="todayPreview" class="today-preview empty">
+              <span>今日照片会显示在这里</span>
+            </div>
+            <dl class="metadata-list">
+              <div>
+                <dt>日期</dt>
+                <dd id="todayDate">--</dd>
+              </div>
+              <div>
+                <dt>保存位置</dt>
+                <dd id="todayPath">--</dd>
+              </div>
+              <div>
+                <dt>拍摄时间</dt>
+                <dd id="todayCapturedAt">--</dd>
+              </div>
+            </dl>
+            <div class="secondary-actions">
+              <button id="setTodayReferenceBtn" class="button secondary compact" type="button" disabled>设为基准</button>
+              <button id="clearReferenceBtn" class="button secondary compact" type="button" disabled>清除基准</button>
+            </div>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-heading">
+              <p class="eyebrow">Alignment</p>
+              <h2>对齐叠图</h2>
+            </div>
+            <div class="control-grid">
+              <label class="field-row" for="referencePhotoSelect">
+                <span>基准照片</span>
+                <select id="referencePhotoSelect">
+                  <option value="">不固定，自动使用最近照片</option>
+                </select>
+              </label>
+              <label class="field-row" for="cameraResolutionSelect">
+                <span>预览分辨率</span>
+                <select id="cameraResolutionSelect">
+                  <option value="high">高 1920 x 1080</option>
+                  <option value="medium">中 1280 x 720</option>
+                  <option value="low">低 960 x 540</option>
+                  <option value="auto">自动</option>
+                </select>
+              </label>
+              <label class="field-row" for="cameraDeviceSelect">
+                <span>摄像头</span>
+                <select id="cameraDeviceSelect">
+                  <option value="">系统默认</option>
+                </select>
+              </label>
+              <label class="field-row" for="cameraResolutionSelect">
+                <span>预览分辨率</span>
+                <select id="cameraResolutionSelect">
+                  <option value="high">高 1920 x 1080</option>
+                  <option value="medium">中 1280 x 720</option>
+                  <option value="low">低 960 x 540</option>
+                  <option value="auto">自动</option>
+                </select>
+              </label>
+            </div>
+            <label class="slider-row" for="overlayOpacity">
+              <span>参考图透明度</span>
+              <input id="overlayOpacity" type="range" min="0" max="100" value="0" />
+              <output id="overlayOpacityValue" for="overlayOpacity">0%</output>
+            </label>
+            <p id="overlayHint" class="hint">关键点对齐会显示基准姿态和当前姿态，参考图叠加只是辅助。</p>
+            <p id="referenceHint" class="hint">当前没有固定基准照片。</p>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-heading">
+              <p class="eyebrow">Frame</p>
+              <h2>画幅与构图</h2>
+            </div>
+            <div class="control-grid">
+              <label class="field-row" for="aspectRatioSelect">
+                <span>画幅</span>
+                <select id="aspectRatioSelect">
+                  <option value="4:5">4:5 半身记录</option>
+                  <option value="3:4">3:4 更多背景</option>
+                  <option value="1:1">1:1 头像视频</option>
+                  <option value="9:16">9:16 竖屏短视频</option>
+                </select>
+              </label>
+              <label class="field-row" for="guideModeSelect">
+                <span>指引</span>
+                <select id="guideModeSelect">
+                  <option value="half-body">半身记录</option>
+                  <option value="portrait">头像记录</option>
+                  <option value="background">背景对齐</option>
+                </select>
+              </label>
+            </div>
+            <p id="captureSpec" class="hint">默认 4:5，输出 1536 x 1920。</p>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-heading">
+              <p class="eyebrow">Watermark</p>
+              <h2>水印样式</h2>
+            </div>
+            <div class="control-grid">
+              <label class="field-row" for="watermarkStyleSelect">
+                <span>样式</span>
+                <select id="watermarkStyleSelect">
+                  <option value="digital">数码管</option>
+                  <option value="classic">经典粗体</option>
+                  <option value="minimal">极简小字</option>
+                </select>
+              </label>
+              <label class="field-row" for="watermarkPositionSelect">
+                <span>位置</span>
+                <select id="watermarkPositionSelect">
+                  <option value="bottom-left">左下</option>
+                  <option value="bottom-right">右下</option>
+                  <option value="top-left">左上</option>
+                  <option value="top-right">右上</option>
+                </select>
+              </label>
+              <label class="field-row" for="watermarkSizeSelect">
+                <span>大小</span>
+                <select id="watermarkSizeSelect">
+                  <option value="small">小</option>
+                  <option value="medium">中</option>
+                  <option value="large">大</option>
+                </select>
+              </label>
+              <label class="field-row color-row" for="watermarkColorInput">
+                <span>颜色</span>
+                <input id="watermarkColorInput" type="color" value="#fff3d0" />
+              </label>
+              <label class="check-row" for="watermarkBackgroundInput">
+                <input id="watermarkBackgroundInput" type="checkbox" checked />
+                <span>显示半透明底色</span>
+              </label>
+            </div>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-heading">
+              <p class="eyebrow">Recent</p>
+              <h2>最近记录</h2>
+            </div>
+            <div class="secondary-actions">
+              <button id="openPreviewBtn" class="button secondary compact" type="button" disabled>快速预览</button>
+            </div>
+            <div id="recentList" class="recent-list" aria-live="polite">
+              <p class="hint">还没有照片记录。</p>
+            </div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <div id="previewModal" class="preview-modal hidden" aria-live="polite">
+      <div class="preview-dialog">
+        <div class="preview-stage">
+          <img id="previewImage" alt="照片快速预览" />
+        </div>
+        <div class="preview-toolbar">
+          <div class="preview-meta">
+            <p class="eyebrow">Preview</p>
+            <h2 id="previewDate">--</h2>
+          </div>
+          <div class="preview-controls">
+            <button id="previewPrevBtn" class="button secondary compact" type="button">上一张</button>
+            <button id="previewPlayBtn" class="button primary compact" type="button">播放</button>
+            <button id="previewNextBtn" class="button secondary compact" type="button">下一张</button>
+            <label class="slider-row compact-slider" for="previewSpeed">
+              <span>速度</span>
+              <input id="previewSpeed" type="range" min="1" max="12" value="6" />
+              <output id="previewSpeedValue" for="previewSpeed">6 fps</output>
+            </label>
+            <button id="closePreviewBtn" class="button secondary compact" type="button">关闭</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <canvas id="captureCanvas" class="hidden" width="1536" height="1920"></canvas>
+    <script defer charset="utf-8" src="./src/app.js"></script>
+  </body>
+</html>
