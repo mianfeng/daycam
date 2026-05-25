@@ -10,3 +10,4 @@ or backend-specific guidance.
 | [Coding Style](./coding-style.md) | Plain JS/CSS conventions |
 | [Runtime and Browser](./runtime-browser.md) | Local server, browser, and asset rules |
 | [Git Workflow](./git-workflow.md) | Repository hygiene and commit boundaries |
+| [Single-Improvement Loop](./single-improvement-loop.md) | Product/engineering loop for choosing one high-impact improvement |
