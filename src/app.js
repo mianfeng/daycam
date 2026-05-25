@@ -1489,7 +1489,8 @@ async function handleReferencePhotoSelectChange() {
 }
 
 async function handleSettingsChange() {
-  state.metadata.settings = {
+  const previousSettings = getSettings();
+  const nextSettings = normalizeSettings({
     capture: {
       aspectRatio: elements.aspectRatioSelect.value,
       guideMode: elements.guideModeSelect.value,
@@ -1506,14 +1507,22 @@ async function handleSettingsChange() {
     overlay: {
       opacity: Number(elements.overlayOpacity.value),
     },
-    referencePhotoDate: getSettings().referencePhotoDate,
-  };
+    referencePhotoDate: previousSettings.referencePhotoDate,
+  });
+  const shouldRestartCamera = hasCameraInputChanged(previousSettings, nextSettings);
+
+  state.metadata.settings = nextSettings;
   applySettingsToUi();
   await writeMetadata();
 
-  if (state.stream && !state.cameraStarting) {
+  if (shouldRestartCamera && state.stream && !state.cameraStarting) {
     startCamera();
   }
+}
+
+function hasCameraInputChanged(previousSettings, nextSettings) {
+  return previousSettings.capture.cameraDeviceId !== nextSettings.capture.cameraDeviceId
+    || previousSettings.capture.cameraResolution !== nextSettings.capture.cameraResolution;
 }
 
 function applySettingsToUi() {

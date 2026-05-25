@@ -22,3 +22,37 @@ library and no backend server state.
 - Do not store personal photo data in git-tracked files.
 - Keep UI state and saved metadata separate: UI-only toggles should not be
   persisted unless the behavior is useful across sessions.
+
+## Setting Side Effects
+
+Persisted settings must not restart camera capture by default. Compare the
+previous normalized settings with the next normalized settings, then trigger
+runtime side effects only for the fields that require them.
+
+Good:
+
+```js
+const previousSettings = getSettings();
+const nextSettings = normalizeSettings(readSettingsFromUi());
+const shouldRestartCamera = hasCameraInputChanged(previousSettings, nextSettings);
+
+state.metadata.settings = nextSettings;
+await writeMetadata();
+
+if (shouldRestartCamera && state.stream && !state.cameraStarting) {
+  startCamera();
+}
+```
+
+Bad:
+
+```js
+state.metadata.settings = readSettingsFromUi();
+await writeMetadata();
+startCamera();
+```
+
+Only camera input changes, such as selected device or preview resolution, should
+restart the active stream. Visual settings such as watermark style, guide mode,
+overlay opacity, or output aspect ratio should update UI and metadata without
+interrupting the camera.
