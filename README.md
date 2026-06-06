@@ -155,6 +155,7 @@ Daycam is local-first by design.
 
 ```text
 index.html                       Static entrypoint and DOM
+assets/                          Favicon and web app icon assets
 src/app.js                       Camera, capture, watermark, storage, pose logic
 src/styles.css                   Layout, responsive UI, visual design
 tools/serve_utf8.py              Local UTF-8 static server
