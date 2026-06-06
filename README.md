@@ -1,41 +1,68 @@
 # Daycam
 
-Daycam 是一个个人每日标准化拍照工具。首版目标是稳定完成这条闭环：打开摄像头、按固定构图拍照、写入时间戳水印、保存到可迁移的 `daycam-data` 文件夹。
+![Static Web](https://img.shields.io/badge/static-web-2aa7a1)
+![Local First](https://img.shields.io/badge/local--first-storage-db543d)
+![Chrome Edge](https://img.shields.io/badge/browser-Chrome%20%2F%20Edge-e3ae48)
+![No Backend](https://img.shields.io/badge/backend-none-24211a)
 
-## 本地运行
+Daycam is a local-first daily photo ritual tool for taking the same kind of picture every day.
 
-当前实现是无构建依赖的本地 Web 核心，适合后续封装为桌面应用。摄像头和本地文件夹授权需要在 `localhost` 这类安全上下文运行。
+It gives you a repeatable capture frame, timestamp watermark, review-before-save flow, recent-photo reference overlay, and pose alignment guide. The core promise is simple: open the camera, align yourself, take one daily photo, and keep the archive portable.
+
+Daycam is currently a plain static web app. There is no backend, no database server, no account system, and no build step.
+
+## Why Daycam
+
+Most camera apps are optimized for one-off photos. Daycam is optimized for continuity.
+
+- Standardized framing with `4:5`, `3:4`, `1:1`, and `9:16` capture presets.
+- Timestamp watermark burned into the final JPEG, with configurable style, size, color, and position.
+- Review-before-save workflow so a bad take never silently becomes today's record.
+- Automatic archive handling when the same day is captured more than once.
+- Recent-photo reference overlay for visual consistency across days.
+- Local MediaPipe pose landmarks for alignment, without loading model assets from a CDN.
+- Portable `daycam-data/` folder that can be copied, backed up, or synced independently.
+
+## Current Status
+
+Daycam is in active MVP development.
+
+The desktop/local browser workflow is functional. The next product direction is Android mobile usage through an HTTPS/PWA deployment, so daily capture can continue even when the desktop computer is off.
+
+Planned mobile deployment target:
+
+```text
+https://daycam.enjyit.com
+```
+
+The hosted site will contain only the Daycam app code and model assets. User photos stay in the selected local `daycam-data/` folder and can be synced to Google Drive manually or through external tooling.
+
+## Quick Start
+
+Run Daycam from a localhost server. Do not open `index.html` directly with `file://`.
 
 ```bat
 conda run -n video python tools\serve_utf8.py 5173
 ```
 
-然后用 Chrome 或 Edge 打开：
+Open Chrome or Edge:
 
 ```text
 http://localhost:5173
 ```
 
-不要直接双击打开 `index.html`。直接打开会变成 `file://` 地址，浏览器可能拦截摄像头、文件夹授权或脚本加载，表现为按钮没有反应。这里使用自带的 UTF-8 静态服务脚本，避免外部脚本里的中文文案在部分环境下出现乱码。
+Why localhost matters:
 
-## 本地关键点模型
+- Camera access requires a secure browser context.
+- Directory read/write uses the File System Access API.
+- Local model and WASM assets must be served with normal browser loading rules.
+- The bundled UTF-8 server avoids garbled Chinese UI text on some systems.
 
-关键点对齐使用本地资源加载，不依赖在线 CDN 或远程模型地址。相关文件位于：
+## Data Model
 
-```text
-vendor/mediapipe/
-models/pose_landmarker_lite.task
-```
+On first use, choose or create a folder named `daycam-data`.
 
-如果需要重新拉取这些资源，可以运行：
-
-```bat
-conda run -n video python tools\download_pose_assets.py
-```
-
-## 数据目录
-
-首次使用时选择一个文件夹作为 `daycam-data`。所有数据都保存在这个文件夹里，换电脑时复制或同步整个文件夹即可。
+Daycam stores metadata, photos, and same-day overwrite archives inside that folder:
 
 ```text
 daycam-data/
@@ -48,22 +75,111 @@ daycam-data/
       2026-04-27_10-30-21.jpg
 ```
 
-## 首版行为
+`daycam-data/` is ignored by git and should never be committed.
 
-- 默认画幅为 `4:5`，输出照片为 `1536 x 1920`，比 9:16 保留更多身体和背景。
-- 可在界面中切换 `4:5`、`3:4`、`1:1`、`9:16`。
-- 输出格式为 JPEG，质量为 `0.9`。
-- 水印格式为 `YYYY-MM-DD HH:mm`，默认是数码管风格，写入图片左下角。
-- 取景器中会实时预览当前水印样式；可在界面中调整水印样式、位置、大小、颜色和半透明底色。
-- 数码管水印带辉光效果，默认偏暖白色。
-- 点击拍摄后会显示 `2 / 1` 倒计时，倒数结束后先生成待确认预览。
-- 待确认照片需要手动点击“保存照片”才会写入 `photos/`；不满意可以点“重新拍摄”回到实时取景，摆好 pose 后再手动拍摄。
-- 今日照片和最近记录都可以设为基准照片，也可以在对齐面板的下拉框里直接选择基准照片。
-- 自动关键点对齐会显示基准姿态和当前姿态的结构差异，默认关闭参考图透明叠加。
-- 当天重复拍摄时，会先把旧照片备份到 `archive/`，再覆盖今日照片。
-- 取景器支持半身记录、头像记录、背景对齐三种构图指引。
-- 如果有历史照片，会自动加载最近一张作为半透明对齐叠图。
+## Capture Flow
 
-## 浏览器要求
+1. Choose the `daycam-data` folder.
+2. Start the camera.
+3. Select aspect ratio, guide mode, camera, and watermark settings.
+4. Align against the frame guide, pose landmarks, or recent-photo overlay.
+5. Capture after the countdown.
+6. Review the generated photo.
+7. Save or retake.
 
-请选择 Chrome 或 Edge。首版使用 File System Access API 保存本地文件夹，Firefox 和 Safari 目前不支持完整的目录读写授权。
+If today's photo already exists, Daycam archives the old file before writing the new one.
+
+## Browser Support
+
+Recommended:
+
+- Chrome on Windows/macOS/Linux
+- Edge on Windows/macOS/Linux
+- Android Chrome/Edge for the planned mobile MVP
+
+Not primary targets:
+
+- Firefox
+- Safari
+- iOS Chrome
+
+The main blocker is complete user-selected directory read/write support through the File System Access API.
+
+## Local Assets
+
+Pose alignment uses local MediaPipe assets:
+
+```text
+vendor/mediapipe/
+models/pose_landmarker_lite.task
+```
+
+Refresh them only when needed:
+
+```bat
+conda run -n video python tools\download_pose_assets.py
+```
+
+Keep these assets local. Daycam should not depend on CDN-hosted runtime model files.
+
+## Deploying To Cloudflare Pages
+
+The intended mobile distribution path is:
+
+```text
+GitHub repository -> Cloudflare Pages -> daycam.enjyit.com
+```
+
+Suggested Cloudflare Pages settings:
+
+```text
+Framework preset: None
+Build command: None
+Output directory: /
+Custom domain: daycam.enjyit.com
+```
+
+Do not deploy `daycam-data/` or `tmp/`. They are local runtime folders and are already ignored by git.
+
+## Privacy
+
+Daycam is local-first by design.
+
+- Daycam does not upload photos by itself.
+- Daycam does not include analytics.
+- Daycam does not require an account.
+- The planned public HTTPS/PWA deployment serves the app, not user data.
+- Google Drive is currently an external backup/sync location, not an integrated Daycam backend.
+
+## Project Structure
+
+```text
+index.html                       Static entrypoint and DOM
+src/app.js                       Camera, capture, watermark, storage, pose logic
+src/styles.css                   Layout, responsive UI, visual design
+tools/serve_utf8.py              Local UTF-8 static server
+tools/download_pose_assets.py    MediaPipe/model asset refresh helper
+vendor/mediapipe/                Local MediaPipe runtime bundle
+models/pose_landmarker_lite.task Local pose model
+daycam-data/                     User photos and metadata, ignored by git
+tmp/                             Scratch output, ignored by git
+```
+
+## Roadmap
+
+- Publish the app from GitHub through Cloudflare Pages.
+- Attach `daycam.enjyit.com`.
+- Add PWA metadata for Android install-to-home-screen.
+- Improve Android touch layout and camera defaults.
+- Add clearer mobile storage and browser support messaging.
+- Keep Google Drive API integration out of the MVP until the local mobile workflow is stable.
+
+## Troubleshooting
+
+If buttons do nothing, make sure the page is opened from `localhost` or HTTPS, not `file://`.
+
+If the camera will not start, close other apps that may be using the camera and try a lower preview resolution.
+
+If folder selection is unavailable, use Chrome or Edge. Safari and Firefox do not currently provide the same complete directory read/write workflow.
+
+If pose alignment fails to load, confirm that `vendor/mediapipe/` and `models/pose_landmarker_lite.task` exist locally.
