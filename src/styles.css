@@ -106,6 +106,11 @@ button {
   background: rgba(227, 174, 72, 0.14);
 }
 
+.status-pill.busy {
+  border-color: rgba(219, 84, 61, 0.58);
+  background: rgba(219, 84, 61, 0.14);
+}
+
 .status-pill.muted {
   color: var(--muted);
 }
@@ -608,6 +613,68 @@ button {
   border-radius: 8px;
   padding: 16px;
   background: rgba(36, 33, 26, 0.9);
+}
+
+.storage-mode-grid {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.storage-mode-card {
+  border: 1px solid rgba(244, 239, 228, 0.12);
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--paper-soft);
+}
+
+.storage-mode-card strong,
+.storage-mode-card span {
+  display: block;
+}
+
+.storage-mode-card strong {
+  color: var(--paper);
+  font-size: 0.94rem;
+}
+
+.storage-mode-card span {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.storage-mode-card.active {
+  border-color: rgba(42, 167, 161, 0.62);
+  background: rgba(42, 167, 161, 0.13);
+}
+
+.pending-upload-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.pending-upload-item {
+  display: grid;
+  gap: 4px;
+  border: 1px solid rgba(227, 174, 72, 0.3);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: rgba(227, 174, 72, 0.08);
+}
+
+.pending-upload-item strong {
+  color: var(--paper);
+  font-size: 0.88rem;
+}
+
+.pending-upload-item span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
 }
 
 .section-heading h2 {

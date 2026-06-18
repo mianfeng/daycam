@@ -116,9 +116,20 @@ const ALIGNMENT_CONNECTIONS = [
 
 const JPEG_QUALITY = 0.9;
 const METADATA_FILE = "metadata.json";
+const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
+const GOOGLE_IDENTITY_SCRIPT_URL = "https://accounts.google.com/gsi/client";
+const GOOGLE_API_SCRIPT_URL = "https://apis.google.com/js/api.js";
+const GOOGLE_PICKER_VIEW_ID = "FOLDERS";
+const GOOGLE_DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+const DRIVE_FOLDER_STORAGE_KEY = "daycam.driveFolder";
+const PENDING_UPLOAD_DB = "daycam-pending-uploads";
+const PENDING_UPLOAD_STORE = "uploads";
+const PENDING_UPLOAD_DB_VERSION = 1;
 
 const elements = {
   folderStatus: document.querySelector("#folderStatus"),
+  driveStatus: document.querySelector("#driveStatus"),
+  syncStatus: document.querySelector("#syncStatus"),
   cameraStatus: document.querySelector("#cameraStatus"),
   poseStatus: document.querySelector("#poseStatus"),
   unsupportedNotice: document.querySelector("#unsupportedNotice"),
@@ -132,6 +143,8 @@ const elements = {
   cameraPlaceholder: document.querySelector("#cameraPlaceholder"),
   alignmentOverlay: document.querySelector("#alignmentOverlay"),
   chooseFolderBtn: document.querySelector("#chooseFolderBtn"),
+  connectDriveBtn: document.querySelector("#connectDriveBtn"),
+  retryPendingBtn: document.querySelector("#retryPendingBtn"),
   startCameraBtn: document.querySelector("#startCameraBtn"),
   captureBtn: document.querySelector("#captureBtn"),
   todayTitle: document.querySelector("#todayTitle"),
@@ -171,12 +184,26 @@ const elements = {
   previewSpeedValue: document.querySelector("#previewSpeedValue"),
   closePreviewBtn: document.querySelector("#closePreviewBtn"),
   recentList: document.querySelector("#recentList"),
+  storageModeHint: document.querySelector("#storageModeHint"),
+  pendingUploadList: document.querySelector("#pendingUploadList"),
   captureCanvas: document.querySelector("#captureCanvas"),
 };
 
 const state = {
+  storageMode: "none",
   directoryHandle: null,
   metadata: createEmptyMetadata(),
+  drive: {
+    accessToken: "",
+    tokenClient: null,
+    folderId: "",
+    folderName: "",
+    metadataFileId: "",
+    metadataModifiedTime: "",
+    pickerLoaded: false,
+  },
+  pendingUploadCount: 0,
+  pendingUploadDb: null,
   stream: null,
   objectUrls: new Set(),
   isCountingDown: false,
@@ -215,11 +242,13 @@ function init() {
   });
 
   if (!window.isSecureContext) {
-    showError("请通过 http://localhost:5173 打开应用，不要直接使用 file:// 访问。");
+    showError("请通过 localhost 或 HTTPS 打开应用，不要直接使用 file:// 访问。");
   }
 
   elements.todayDate.textContent = getTodayDate();
   elements.chooseFolderBtn.addEventListener("click", chooseDataFolder);
+  elements.connectDriveBtn.addEventListener("click", connectGoogleDrive);
+  elements.retryPendingBtn.addEventListener("click", retryPendingUploads);
   elements.startCameraBtn.addEventListener("click", startCamera);
   elements.captureBtn.addEventListener("click", startCountdownCapture);
   elements.savePendingBtn.addEventListener("click", savePendingPhoto);
@@ -246,7 +275,11 @@ function init() {
   elements.previewSpeed.addEventListener("change", restartPreviewPlaybackIfNeeded);
   elements.closePreviewBtn.addEventListener("click", closePreviewModal);
   bindCameraDiagnostics();
+  window.addEventListener("online", retryPendingUploads);
   navigator.mediaDevices?.addEventListener?.("devicechange", refreshCameraDeviceOptions);
+  registerServiceWorker();
+  initializePendingUploads();
+  restoreDriveFolderSelection();
   updateOverlayOpacity();
   applySettingsToUi();
   startPreviewClock();
@@ -257,10 +290,696 @@ function init() {
   if (!supportsFileSystemAccess()) {
     elements.unsupportedNotice.classList.remove("hidden");
     elements.chooseFolderBtn.disabled = true;
-    setStatus(elements.folderStatus, "文件夹访问不可用", "warn");
+    setStatus(elements.folderStatus, "本地文件夹不可用", "warn");
   }
 
+  updateStorageModeUi();
   renderFromMetadata();
+}
+
+function hasActiveStorage() {
+  return state.storageMode === "local" && Boolean(state.directoryHandle)
+    || state.storageMode === "drive" && Boolean(state.drive.accessToken && state.drive.folderId);
+}
+
+function updateStorageModeUi() {
+  document.querySelectorAll(".storage-mode-card").forEach((card) => {
+    card.classList.toggle("active", card.dataset.mode === state.storageMode);
+  });
+
+  if (state.storageMode === "local" && state.directoryHandle) {
+    elements.storageModeHint.textContent = `当前使用本地文件夹：${state.directoryHandle.name}`;
+  } else if (state.storageMode === "drive" && state.drive.folderId) {
+    const folderName = state.drive.folderName || "daycam-data";
+    elements.storageModeHint.textContent = `当前使用 Google Drive：${folderName}`;
+  } else {
+    elements.storageModeHint.textContent = "请选择本地文件夹或连接 Google Drive。";
+  }
+
+  updateCaptureAvailability();
+}
+
+function restoreDriveFolderSelection() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(DRIVE_FOLDER_STORAGE_KEY) || "null");
+    if (!stored?.id) {
+      return;
+    }
+
+    state.drive.folderId = String(stored.id);
+    state.drive.folderName = stored.name ? String(stored.name) : "daycam-data";
+    setStatus(elements.driveStatus, `Drive 已记住：${state.drive.folderName}`, "muted");
+  } catch {
+    window.localStorage.removeItem(DRIVE_FOLDER_STORAGE_KEY);
+  }
+}
+
+function rememberDriveFolder(folder) {
+  state.drive.folderId = folder.id;
+  state.drive.folderName = folder.name || "daycam-data";
+  window.localStorage.setItem(DRIVE_FOLDER_STORAGE_KEY, JSON.stringify({
+    id: state.drive.folderId,
+    name: state.drive.folderName,
+  }));
+}
+
+function getGoogleConfig() {
+  return window.DAYCAM_GOOGLE_CONFIG ?? {};
+}
+
+function hasGoogleConfig() {
+  const config = getGoogleConfig();
+  return Boolean(config.clientId && config.apiKey);
+}
+
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator) || !window.isSecureContext) {
+    return;
+  }
+
+  try {
+    await navigator.serviceWorker.register("./sw.js");
+  } catch (error) {
+    console.warn("service worker registration failed", error);
+  }
+}
+
+async function connectGoogleDrive() {
+  if (!hasGoogleConfig()) {
+    showError("请先在 src/google-config.js 填入 Google OAuth client id 和 API key。");
+    return;
+  }
+
+  elements.connectDriveBtn.disabled = true;
+  elements.connectDriveBtn.textContent = "正在连接...";
+  setStatus(elements.driveStatus, "Drive 连接中", "busy");
+
+  try {
+    await loadGoogleLibraries();
+    await requestGoogleAccessToken();
+
+    let selectedFolder = state.drive.folderId
+      ? { id: state.drive.folderId, name: state.drive.folderName || "daycam-data" }
+      : null;
+
+    if (!selectedFolder) {
+      selectedFolder = await pickDriveFolder();
+    }
+
+    rememberDriveFolder(selectedFolder);
+    await validateDriveArchive(selectedFolder.id);
+    state.storageMode = "drive";
+    state.directoryHandle = null;
+    state.metadata = await readDriveMetadata();
+    applySettingsToUi();
+
+    setStatus(elements.driveStatus, `Drive：${state.drive.folderName}`, "ready");
+    setStatus(elements.folderStatus, "本地文件夹未使用", "muted");
+    updateStorageModeUi();
+    await renderFromMetadata();
+    await retryPendingUploads();
+  } catch (error) {
+    setStatus(elements.driveStatus, "Drive 未连接", "warn");
+    showError(`连接 Google Drive 失败：${error.message}`);
+  } finally {
+    elements.connectDriveBtn.disabled = false;
+    elements.connectDriveBtn.textContent = "连接 Google Drive";
+    updateCaptureAvailability();
+  }
+}
+
+async function loadGoogleLibraries() {
+  await loadScript(GOOGLE_IDENTITY_SCRIPT_URL);
+  await loadScript(GOOGLE_API_SCRIPT_URL);
+
+  if (!window.google?.accounts?.oauth2 || !window.gapi) {
+    throw new Error("Google 登录库加载失败。");
+  }
+
+  if (!state.drive.pickerLoaded) {
+    await new Promise((resolve, reject) => {
+      window.gapi.load("picker", {
+        callback: resolve,
+        onerror: () => reject(new Error("Google Picker 加载失败。")),
+      });
+    });
+    state.drive.pickerLoaded = true;
+  }
+}
+
+function loadScript(src) {
+  const existing = document.querySelector(`script[src="${src}"]`);
+  if (existing) {
+    return existing.dataset.loaded === "true"
+      ? Promise.resolve()
+      : new Promise((resolve, reject) => {
+          existing.addEventListener("load", resolve, { once: true });
+          existing.addEventListener("error", reject, { once: true });
+        });
+  }
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.defer = true;
+    script.addEventListener("load", () => {
+      script.dataset.loaded = "true";
+      resolve();
+    }, { once: true });
+    script.addEventListener("error", () => reject(new Error(`无法加载 ${src}`)), { once: true });
+    document.head.append(script);
+  });
+}
+
+function requestGoogleAccessToken() {
+  const config = getGoogleConfig();
+
+  return new Promise((resolve, reject) => {
+    state.drive.tokenClient = window.google.accounts.oauth2.initTokenClient({
+      client_id: config.clientId,
+      scope: GOOGLE_DRIVE_SCOPE,
+      callback: (response) => {
+        if (response?.error) {
+          reject(new Error(response.error));
+          return;
+        }
+
+        state.drive.accessToken = response.access_token;
+        resolve();
+      },
+    });
+
+    state.drive.tokenClient.requestAccessToken({
+      prompt: state.drive.accessToken ? "" : "consent",
+    });
+  });
+}
+
+function pickDriveFolder() {
+  const config = getGoogleConfig();
+
+  return new Promise((resolve, reject) => {
+    const view = new window.google.picker.DocsView(window.google.picker.ViewId[GOOGLE_PICKER_VIEW_ID])
+      .setIncludeFolders(true)
+      .setSelectFolderEnabled(true)
+      .setMimeTypes(GOOGLE_DRIVE_FOLDER_MIME_TYPE);
+
+    const builder = new window.google.picker.PickerBuilder()
+      .setDeveloperKey(config.apiKey)
+      .setOAuthToken(state.drive.accessToken)
+      .setOrigin(window.location.origin)
+      .addView(view)
+      .setCallback((data) => {
+        if (data.action === window.google.picker.Action.CANCEL) {
+          reject(new Error("已取消选择 Google Drive 文件夹。"));
+          return;
+        }
+
+        if (data.action !== window.google.picker.Action.PICKED) {
+          return;
+        }
+
+        const doc = data.docs?.[0];
+        if (!doc?.id) {
+          reject(new Error("未选择有效的 Google Drive 文件夹。"));
+          return;
+        }
+
+        resolve({ id: doc.id, name: doc.name || doc.id });
+      });
+
+    if (config.appId) {
+      builder.setAppId(config.appId);
+    }
+
+    builder.build().setVisible(true);
+  });
+}
+
+async function validateDriveArchive(folderId) {
+  const children = await listDriveChildren(folderId);
+  const names = new Set(children.map((file) => file.name));
+  const looksLikeArchive = names.has(METADATA_FILE) || names.has("photos") || names.has("archive");
+
+  if (looksLikeArchive) {
+    return;
+  }
+
+  const confirmed = window.confirm("所选文件夹不像 Daycam 的 daycam-data 归档。仍然使用这个文件夹吗？");
+  if (!confirmed) {
+    throw new Error("请选择现有 daycam-data 文件夹。");
+  }
+}
+
+async function writePendingPhotoToDrive(pending) {
+  const latestMetadata = await readDriveMetadata();
+  state.metadata = latestMetadata;
+
+  const photosRoot = await ensureDriveFolder(state.drive.folderId, "photos");
+  const photoYear = await ensureDriveFolder(photosRoot.id, pending.year);
+  const archiveRoot = await ensureDriveFolder(state.drive.folderId, "archive");
+  const archiveYear = await ensureDriveFolder(archiveRoot.id, pending.year);
+  const existingPhoto = await getDriveFileByName(photoYear.id, pending.fileName);
+
+  if (existingPhoto) {
+    const archiveName = `${pending.date}_${formatTimeForFile(new Date(pending.createdAt))}.jpg`;
+    await copyDriveFile(existingPhoto.id, archiveYear.id, archiveName);
+    await updateDriveFileContent(existingPhoto.id, pending.blob, "image/jpeg");
+  } else {
+    await createDriveFile(photoYear.id, pending.fileName, pending.blob, "image/jpeg");
+  }
+
+  upsertPhotoRecord(createPhotoRecordFromPending(pending));
+  await writeDriveMetadata(state.metadata);
+}
+
+async function readDriveMetadata() {
+  await ensureDriveReady();
+  const metadataFile = await getDriveFileByName(state.drive.folderId, METADATA_FILE);
+
+  if (!metadataFile) {
+    state.drive.metadataFileId = "";
+    state.drive.metadataModifiedTime = "";
+    return createEmptyMetadata();
+  }
+
+  state.drive.metadataFileId = metadataFile.id;
+  state.drive.metadataModifiedTime = metadataFile.modifiedTime || "";
+
+  const blob = await downloadDriveFile(metadataFile.id);
+  try {
+    return normalizeMetadata(JSON.parse(await blob.text()));
+  } catch {
+    throw new Error("Google Drive 中的 metadata.json 不是有效 JSON。");
+  }
+}
+
+async function writeDriveMetadata(metadata) {
+  if (state.storageMode !== "drive" || !state.drive.folderId) {
+    return;
+  }
+
+  await ensureDriveReady();
+  const normalized = normalizeMetadata({
+    ...metadata,
+    updatedAt: new Date().toISOString(),
+  });
+  const blob = new Blob([JSON.stringify(normalized, null, 2)], { type: "application/json" });
+
+  if (!state.drive.metadataFileId) {
+    const created = await createDriveFile(state.drive.folderId, METADATA_FILE, blob, "application/json");
+    state.drive.metadataFileId = created.id;
+    state.drive.metadataModifiedTime = created.modifiedTime || "";
+    state.metadata = normalized;
+    return;
+  }
+
+  const current = await getDriveFile(state.drive.metadataFileId, "id,modifiedTime");
+  if (state.drive.metadataModifiedTime && current.modifiedTime !== state.drive.metadataModifiedTime) {
+    throw new Error("metadata.json 已在 Google Drive 中变化，请刷新后再保存。");
+  }
+
+  const updated = await updateDriveFileContent(state.drive.metadataFileId, blob, "application/json");
+  state.drive.metadataModifiedTime = updated.modifiedTime || "";
+  state.metadata = normalized;
+}
+
+async function ensureDriveReady() {
+  if (!state.drive.accessToken) {
+    await loadGoogleLibraries();
+    await requestGoogleAccessToken();
+  }
+
+  if (!state.drive.folderId) {
+    throw new Error("请先选择 Google Drive 中的 daycam-data 文件夹。");
+  }
+}
+
+async function getDriveFileFromPath(path) {
+  await ensureDriveReady();
+  const file = await resolveDrivePath(path);
+  if (!file) {
+    throw new Error(`Google Drive 中找不到 ${path}`);
+  }
+  return downloadDriveFile(file.id);
+}
+
+async function resolveDrivePath(path) {
+  const parts = path.split("/").filter(Boolean);
+  const fileName = parts.pop();
+  let parentId = state.drive.folderId;
+
+  for (const part of parts) {
+    const directory = await getDriveFileByName(parentId, part, GOOGLE_DRIVE_FOLDER_MIME_TYPE);
+    if (!directory) {
+      return null;
+    }
+    parentId = directory.id;
+  }
+
+  return getDriveFileByName(parentId, fileName);
+}
+
+async function ensureDriveFolder(parentId, name) {
+  const existing = await getDriveFileByName(parentId, name, GOOGLE_DRIVE_FOLDER_MIME_TYPE);
+  if (existing) {
+    return existing;
+  }
+
+  return createDriveFile(parentId, name, null, GOOGLE_DRIVE_FOLDER_MIME_TYPE);
+}
+
+async function getDriveFileByName(parentId, name, mimeType = "") {
+  const queryParts = [
+    `'${parentId}' in parents`,
+    `name = '${escapeDriveQueryValue(name)}'`,
+    "trashed = false",
+  ];
+
+  if (mimeType) {
+    queryParts.push(`mimeType = '${mimeType}'`);
+  }
+
+  const data = await driveRequest(`/files?q=${encodeURIComponent(queryParts.join(" and "))}&fields=files(id,name,mimeType,modifiedTime)`);
+  return data.files?.[0] ?? null;
+}
+
+async function listDriveChildren(parentId) {
+  const query = `'${parentId}' in parents and trashed = false`;
+  const data = await driveRequest(`/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,modifiedTime)`);
+  return data.files ?? [];
+}
+
+async function getDriveFile(fileId, fields = "id,name,mimeType,modifiedTime") {
+  return driveRequest(`/files/${encodeURIComponent(fileId)}?fields=${encodeURIComponent(fields)}`);
+}
+
+async function downloadDriveFile(fileId) {
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, {
+    headers: {
+      Authorization: `Bearer ${state.drive.accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google Drive 下载失败：${response.status}`);
+  }
+
+  return response.blob();
+}
+
+async function createDriveFile(parentId, name, blob, mimeType) {
+  const metadata = {
+    name,
+    parents: [parentId],
+    mimeType,
+  };
+
+  if (mimeType === GOOGLE_DRIVE_FOLDER_MIME_TYPE) {
+    return driveRequest("/files?fields=id,name,mimeType,modifiedTime", {
+      method: "POST",
+      body: JSON.stringify(metadata),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+  }
+
+  return uploadDriveMultipart("/files?uploadType=multipart&fields=id,name,mimeType,modifiedTime", metadata, blob);
+}
+
+async function updateDriveFileContent(fileId, blob, mimeType) {
+  const response = await fetch(
+    `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media&fields=id,name,mimeType,modifiedTime`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${state.drive.accessToken}`,
+        "Content-Type": mimeType,
+      },
+      body: blob,
+    },
+  );
+
+  return parseDriveResponse(response);
+}
+
+async function copyDriveFile(fileId, parentId, name) {
+  return driveRequest(`/files/${encodeURIComponent(fileId)}/copy?fields=id,name,mimeType,modifiedTime`, {
+    method: "POST",
+    body: JSON.stringify({
+      name,
+      parents: [parentId],
+    }),
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+}
+
+async function uploadDriveMultipart(path, metadata, blob) {
+  const boundary = `daycam_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const delimiter = `--${boundary}\r\n`;
+  const nextDelimiter = `\r\n--${boundary}\r\n`;
+  const closeDelimiter = `\r\n--${boundary}--`;
+  const body = new Blob([
+    delimiter,
+    "Content-Type: application/json; charset=UTF-8\r\n\r\n",
+    JSON.stringify(metadata),
+    nextDelimiter,
+    `Content-Type: ${blob.type || "application/octet-stream"}\r\n\r\n`,
+    blob,
+    closeDelimiter,
+  ]);
+
+  const response = await fetch(`https://www.googleapis.com/upload/drive/v3${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${state.drive.accessToken}`,
+      "Content-Type": `multipart/related; boundary=${boundary}`,
+    },
+    body,
+  });
+
+  return parseDriveResponse(response);
+}
+
+async function driveRequest(path, options = {}) {
+  const response = await fetch(`https://www.googleapis.com/drive/v3${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${state.drive.accessToken}`,
+      ...(options.headers ?? {}),
+    },
+  });
+
+  return parseDriveResponse(response);
+}
+
+async function parseDriveResponse(response) {
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const error = await response.json();
+      detail = error?.error?.message ? `：${error.error.message}` : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(`Google Drive 请求失败 ${response.status}${detail}`);
+  }
+
+  if (response.status === 204) {
+    return {};
+  }
+
+  return response.json();
+}
+
+function escapeDriveQueryValue(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+async function initializePendingUploads() {
+  try {
+    state.pendingUploadDb = await openPendingUploadDb();
+    await refreshPendingUploads();
+  } catch (error) {
+    setStatus(elements.syncStatus, "待上传队列不可用", "warn");
+    showError(`待上传队列初始化失败：${error.message}`);
+  }
+}
+
+function openPendingUploadDb() {
+  if (!("indexedDB" in window)) {
+    return Promise.reject(new Error("当前浏览器不支持 IndexedDB。"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(PENDING_UPLOAD_DB, PENDING_UPLOAD_DB_VERSION);
+
+    request.addEventListener("upgradeneeded", () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(PENDING_UPLOAD_STORE)) {
+        const store = db.createObjectStore(PENDING_UPLOAD_STORE, { keyPath: "id" });
+        store.createIndex("createdAt", "createdAt");
+      }
+    });
+
+    request.addEventListener("success", () => resolve(request.result), { once: true });
+    request.addEventListener("error", () => reject(request.error), { once: true });
+  });
+}
+
+async function enqueuePendingUpload(pending, error) {
+  const upload = {
+    id: `${pending.date}-${pending.createdAt}`,
+    createdAt: new Date().toISOString(),
+    retryCount: 0,
+    lastError: error?.message || "未知错误",
+    pending: {
+      blob: pending.blob,
+      date: pending.date,
+      file: pending.file,
+      fileName: pending.fileName,
+      year: pending.year,
+      width: pending.width,
+      height: pending.height,
+      createdAt: pending.createdAt,
+      timestampText: pending.timestampText,
+      hasTimestamp: pending.hasTimestamp,
+    },
+  };
+
+  await putPendingUpload(upload);
+}
+
+async function putPendingUpload(upload) {
+  const db = await getPendingUploadDb();
+  return runObjectStoreRequest("readwrite", (store) => store.put(upload));
+}
+
+async function listPendingUploads() {
+  const db = await getPendingUploadDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(PENDING_UPLOAD_STORE, "readonly");
+    const store = transaction.objectStore(PENDING_UPLOAD_STORE);
+    const request = store.getAll();
+
+    request.addEventListener("success", () => {
+      const uploads = request.result ?? [];
+      uploads.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      resolve(uploads);
+    }, { once: true });
+    request.addEventListener("error", () => reject(request.error), { once: true });
+  });
+}
+
+async function deletePendingUpload(id) {
+  await getPendingUploadDb();
+  return runObjectStoreRequest("readwrite", (store) => store.delete(id));
+}
+
+async function updatePendingUploadError(upload, error) {
+  await putPendingUpload({
+    ...upload,
+    retryCount: Number(upload.retryCount || 0) + 1,
+    lastError: error?.message || "未知错误",
+  });
+}
+
+async function getPendingUploadDb() {
+  if (state.pendingUploadDb) {
+    return state.pendingUploadDb;
+  }
+
+  state.pendingUploadDb = await openPendingUploadDb();
+  return state.pendingUploadDb;
+}
+
+function runObjectStoreRequest(mode, callback) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.pendingUploadDb.transaction(PENDING_UPLOAD_STORE, mode);
+    const store = transaction.objectStore(PENDING_UPLOAD_STORE);
+    const request = callback(store);
+
+    request.addEventListener("success", () => resolve(request.result), { once: true });
+    request.addEventListener("error", () => reject(request.error), { once: true });
+  });
+}
+
+async function refreshPendingUploads() {
+  const uploads = await listPendingUploads();
+  state.pendingUploadCount = uploads.length;
+  renderPendingUploads(uploads);
+
+  if (!uploads.length) {
+    setStatus(elements.syncStatus, "无待上传", "ready");
+    elements.retryPendingBtn.disabled = true;
+    return;
+  }
+
+  setStatus(elements.syncStatus, `${uploads.length} 张待上传`, "warn");
+  elements.retryPendingBtn.disabled = false;
+}
+
+function renderPendingUploads(uploads) {
+  elements.pendingUploadList.replaceChildren();
+
+  if (!uploads.length) {
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "暂无待上传照片。";
+    elements.pendingUploadList.append(hint);
+    return;
+  }
+
+  for (const upload of uploads) {
+    const item = document.createElement("div");
+    item.className = "pending-upload-item";
+
+    const title = document.createElement("strong");
+    title.textContent = upload.pending?.date || "待上传照片";
+
+    const detail = document.createElement("span");
+    const retryText = upload.retryCount ? `，已重试 ${upload.retryCount} 次` : "";
+    detail.textContent = `${upload.pending?.file ?? "photos/"}${retryText}。${upload.lastError || ""}`;
+
+    item.append(title, detail);
+    elements.pendingUploadList.append(item);
+  }
+}
+
+async function retryPendingUploads() {
+  if (!state.pendingUploadDb) {
+    return;
+  }
+
+  const uploads = await listPendingUploads();
+  if (!uploads.length) {
+    await refreshPendingUploads();
+    return;
+  }
+
+  if (!state.drive.folderId || !state.drive.accessToken) {
+    setStatus(elements.syncStatus, `${uploads.length} 张待上传`, "warn");
+    return;
+  }
+
+  setStatus(elements.syncStatus, "正在补传", "busy");
+  elements.retryPendingBtn.disabled = true;
+
+  for (const upload of uploads) {
+    try {
+      await writePendingPhotoToDrive(upload.pending);
+      await deletePendingUpload(upload.id);
+    } catch (error) {
+      await updatePendingUploadError(upload, error);
+    }
+  }
+
+  await refreshPendingUploads();
+  await renderFromMetadata();
 }
 
 async function chooseDataFolder() {
@@ -282,8 +1001,11 @@ async function chooseDataFolder() {
       return;
     }
 
+    state.storageMode = "local";
     state.directoryHandle = handle;
     state.metadata = await readMetadata(handle);
+    state.drive.metadataFileId = "";
+    state.drive.metadataModifiedTime = "";
     applySettingsToUi();
     await writeMetadata();
 
@@ -291,6 +1013,7 @@ async function chooseDataFolder() {
       ? `，已恢复 ${state.recoveredPhotoCount} 张历史照片`
       : "";
     setStatus(elements.folderStatus, `数据文件夹：${handle.name}${recoveredSuffix}`, "ready");
+    updateStorageModeUi();
     await renderFromMetadata();
     await refreshReferencePoseData();
     updateCaptureAvailability();
@@ -307,7 +1030,7 @@ async function startCamera() {
   }
 
   if (!window.isSecureContext) {
-    showError("摄像头访问需要在 localhost 下运行，请先启动本地服务。");
+    showError("摄像头访问需要 localhost 或 HTTPS，请先启动本地服务或打开正式域名。");
     return;
   }
 
@@ -542,8 +1265,8 @@ async function startCountdownCapture() {
     return;
   }
 
-  if (!state.directoryHandle) {
-    showError("请先选择 daycam-data 文件夹。");
+  if (!hasActiveStorage()) {
+    showError("请先选择 daycam-data 文件夹或连接 Google Drive。");
     return;
   }
 
@@ -579,8 +1302,8 @@ async function startCountdownCapture() {
 }
 
 async function preparePendingPhoto() {
-  if (!state.directoryHandle) {
-    showError("请先选择 daycam-data 文件夹。");
+  if (!hasActiveStorage()) {
+    showError("请先选择 daycam-data 文件夹或连接 Google Drive。");
     return;
   }
 
@@ -627,7 +1350,7 @@ async function preparePendingPhoto() {
 }
 
 async function savePendingPhoto() {
-  if (!state.pendingPhoto || !state.directoryHandle) {
+  if (!state.pendingPhoto || !hasActiveStorage()) {
     return;
   }
 
@@ -635,25 +1358,11 @@ async function savePendingPhoto() {
   elements.savePendingBtn.textContent = "正在保存...";
 
   try {
-    const pending = state.pendingPhoto;
-    const yearDirectory = await getDirectory(state.directoryHandle, "photos", true);
-    const photoYearDirectory = await getDirectory(yearDirectory, pending.year, true);
-    await archiveExistingTodayPhoto(photoYearDirectory, pending.fileName, new Date(pending.createdAt));
-    await writeBlob(photoYearDirectory, pending.fileName, pending.blob);
-
-    upsertPhotoRecord({
-      date: pending.date,
-      file: pending.file,
-      width: pending.width,
-      height: pending.height,
-      createdAt: pending.createdAt,
-      timestampText: pending.timestampText,
-      hasTimestamp: true,
-    });
-
-    clearPendingPhoto();
-    await writeMetadata();
-    await renderFromMetadata();
+    if (state.storageMode === "drive") {
+      await saveDrivePendingPhoto(state.pendingPhoto, { enqueueOnFailure: true });
+    } else {
+      await saveLocalPendingPhoto(state.pendingPhoto);
+    }
   } catch (error) {
     showError(`保存照片失败：${error.message}`);
   } finally {
@@ -661,6 +1370,55 @@ async function savePendingPhoto() {
     elements.savePendingBtn.textContent = "保存照片";
     updateCaptureAvailability();
   }
+}
+
+async function saveLocalPendingPhoto(pending) {
+  const yearDirectory = await getDirectory(state.directoryHandle, "photos", true);
+  const photoYearDirectory = await getDirectory(yearDirectory, pending.year, true);
+  await archiveExistingTodayPhoto(photoYearDirectory, pending.fileName, new Date(pending.createdAt));
+  await writeBlob(photoYearDirectory, pending.fileName, pending.blob);
+
+  upsertPhotoRecord(createPhotoRecordFromPending(pending));
+
+  clearPendingPhoto();
+  await writeMetadata();
+  await renderFromMetadata();
+}
+
+async function saveDrivePendingPhoto(pending, options = {}) {
+  const { enqueueOnFailure = false } = options;
+
+  try {
+    await ensureDriveReady();
+    await writePendingPhotoToDrive(pending);
+    clearPendingPhoto();
+    await refreshPendingUploads();
+    setStatus(elements.syncStatus, "已同步到 Drive", "ready");
+    await renderFromMetadata();
+  } catch (error) {
+    if (enqueueOnFailure) {
+      await enqueuePendingUpload(pending, error);
+      clearPendingPhoto();
+      await refreshPendingUploads();
+      setStatus(elements.syncStatus, "有待上传", "warn");
+      showError(`Google Drive 上传失败，已保存到待上传队列：${error.message}`);
+      return;
+    }
+
+    throw error;
+  }
+}
+
+function createPhotoRecordFromPending(pending) {
+  return {
+    date: pending.date,
+    file: pending.file,
+    width: pending.width,
+    height: pending.height,
+    createdAt: pending.createdAt,
+    timestampText: pending.timestampText,
+    hasTimestamp: true,
+  };
 }
 
 function retakePendingPhoto() {
@@ -683,7 +1441,7 @@ function clearPendingPhoto() {
 
 async function initializePoseLandmarker() {
   if (!window.isSecureContext) {
-    setStatus(elements.poseStatus, "请通过 localhost 打开", "warn");
+    setStatus(elements.poseStatus, "需要 localhost 或 HTTPS", "warn");
     return;
   }
   setStatus(elements.poseStatus, "关键点模型加载中", "muted");
@@ -1097,7 +1855,7 @@ function renderReferencePhotoOptions() {
 
 async function refreshReferencePoseData() {
   const referenceRecord = getReferencePhotoRecord() ?? getLatestPhotoRecord();
-  if (!referenceRecord || !state.directoryHandle || !state.poseReady || state.poseDisabled) {
+  if (!referenceRecord || !hasActiveStorage() || !state.poseReady || state.poseDisabled) {
     state.referencePoseData = null;
     return;
   }
@@ -1294,7 +2052,7 @@ async function renderTodayPreview(record) {
   elements.todayPreview.replaceChildren();
   elements.todayPreview.classList.toggle("empty", !record);
 
-  if (!record || !state.directoryHandle) {
+  if (!record || !hasActiveStorage()) {
     const empty = document.createElement("span");
     empty.textContent = "今日照片会显示在这里。";
     elements.todayPreview.append(empty);
@@ -1317,7 +2075,7 @@ async function renderAlignmentOverlay(record, isReference = false) {
   elements.alignmentOverlay.classList.add("hidden");
   elements.alignmentOverlay.removeAttribute("src");
 
-  if (!record || !state.directoryHandle) {
+  if (!record || !hasActiveStorage()) {
     elements.overlayHint.textContent = "关键点对齐会显示基准姿态和当前姿态，参考图叠加仅作为辅助。";
     return;
   }
@@ -1341,7 +2099,7 @@ async function renderRecentList() {
   elements.recentList.replaceChildren();
   const records = getSortedPhotos().slice(-8).reverse();
 
-  if (!records.length || !state.directoryHandle) {
+  if (!records.length || !hasActiveStorage()) {
     const hint = document.createElement("p");
     hint.className = "hint";
     hint.textContent = "还没有照片记录。";
@@ -1633,7 +2391,7 @@ function getOutputSize() {
 }
 
 function updateCaptureAvailability() {
-  elements.captureBtn.disabled = !state.directoryHandle || !state.stream || state.isCountingDown || Boolean(state.pendingPhoto);
+  elements.captureBtn.disabled = !hasActiveStorage() || !state.stream || state.isCountingDown || Boolean(state.pendingPhoto);
 }
 
 function upsertPhotoRecord(record) {
@@ -1804,6 +2562,11 @@ function createRecoveredPhotoRecord(date, year, fileName, file, settings) {
 }
 
 async function writeMetadata() {
+  if (state.storageMode === "drive") {
+    await writeDriveMetadata(state.metadata);
+    return;
+  }
+
   if (!state.directoryHandle) {
     return;
   }
@@ -1957,7 +2720,7 @@ async function refreshCameraDeviceOptions() {
 
 function syncSelectedCameraDevice(deviceId) {
   const currentSettings = getSettings();
-  if (currentSettings.capture.cameraDeviceId === deviceId || !state.directoryHandle) {
+  if (currentSettings.capture.cameraDeviceId === deviceId || !hasActiveStorage()) {
     return;
   }
 
@@ -1994,6 +2757,10 @@ async function createObjectUrlFromPath(path) {
 }
 
 async function getFileFromPath(path) {
+  if (state.storageMode === "drive") {
+    return getDriveFileFromPath(path);
+  }
+
   const parts = path.split("/").filter(Boolean);
   const fileName = parts.pop();
   let directory = state.directoryHandle;
@@ -2027,7 +2794,7 @@ function supportsFileSystemAccess() {
 
 function setStatus(element, text, variant) {
   element.textContent = text;
-  element.classList.remove("ready", "warn", "muted");
+  element.classList.remove("ready", "warn", "muted", "busy");
   element.classList.add(variant);
 }
 

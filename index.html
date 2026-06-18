@@ -9,6 +9,7 @@
     <link rel="icon" href="./assets/daycam-icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="./site.webmanifest" />
     <link rel="stylesheet" href="./src/styles.css" />
+    <script defer charset="utf-8" src="./src/google-config.js"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -19,6 +20,8 @@
         </div>
         <div class="status-cluster" aria-label="Application status">
           <span id="folderStatus" class="status-pill muted">未选择数据文件夹</span>
+          <span id="driveStatus" class="status-pill muted">Google Drive 未连接</span>
+          <span id="syncStatus" class="status-pill muted">无待上传</span>
           <span id="cameraStatus" class="status-pill muted">摄像头未启动</span>
           <span id="poseStatus" class="status-pill muted">关键点模型加载中</span>
         </div>
@@ -27,7 +30,7 @@
       <main class="workspace">
         <section class="capture-area" aria-label="今日拍摄">
           <div id="unsupportedNotice" class="notice hidden" role="alert">
-            当前浏览器不支持本地文件夹授权。请使用 Chrome 或 Edge 打开 localhost 地址。
+            当前浏览器不支持本地文件夹授权。桌面请使用 Chrome 或 Edge；移动端请连接 Google Drive。
           </div>
           <div id="runtimeNotice" class="notice runtime hidden" role="status" aria-live="polite"></div>
 
@@ -66,12 +69,35 @@
 
           <div class="primary-actions">
             <button id="chooseFolderBtn" class="button secondary" type="button">选择 daycam-data 文件夹</button>
+            <button id="connectDriveBtn" class="button secondary" type="button">连接 Google Drive</button>
+            <button id="retryPendingBtn" class="button secondary" type="button" disabled>重试待上传</button>
             <button id="startCameraBtn" class="button secondary" type="button">启动摄像头</button>
             <button id="captureBtn" class="button primary" type="button" disabled>拍摄今日照片</button>
           </div>
         </section>
 
         <aside class="side-panel" aria-label="记录和设置">
+          <section class="panel-section storage-panel">
+            <div class="section-heading">
+              <p class="eyebrow">Storage</p>
+              <h2>存储模式</h2>
+            </div>
+            <div class="storage-mode-grid">
+              <div class="storage-mode-card" data-mode="local">
+                <strong>本地文件夹</strong>
+                <span>桌面 Chrome/Edge，选择 Google Drive 同步盘里的 daycam-data。</span>
+              </div>
+              <div class="storage-mode-card" data-mode="drive">
+                <strong>Google Drive</strong>
+                <span>移动端使用，登录后写入同一个 daycam-data 归档。</span>
+              </div>
+            </div>
+            <p id="storageModeHint" class="hint">请选择本地文件夹或连接 Google Drive。</p>
+            <div id="pendingUploadList" class="pending-upload-list" aria-live="polite">
+              <p class="hint">暂无待上传照片。</p>
+            </div>
+          </section>
+
           <section class="panel-section">
             <div class="section-heading">
               <p class="eyebrow">Today</p>
@@ -125,15 +151,6 @@
                 <span>摄像头</span>
                 <select id="cameraDeviceSelect">
                   <option value="">系统默认</option>
-                </select>
-              </label>
-              <label class="field-row" for="cameraResolutionSelect">
-                <span>预览分辨率</span>
-                <select id="cameraResolutionSelect">
-                  <option value="high">高 1920 x 1080</option>
-                  <option value="medium">中 1280 x 720</option>
-                  <option value="low">低 960 x 540</option>
-                  <option value="auto">自动</option>
                 </select>
               </label>
             </div>
